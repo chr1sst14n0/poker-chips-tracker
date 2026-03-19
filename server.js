@@ -4,579 +4,415 @@ const path = require('path');
 const app = express();
 const server = http.createServer(app);
 const { Server } = require('socket.io');
-const io = new Server(server, {
-  cors: { origin: '*' }
-});
+const io = new Server(server);
 const PORT = process.env.PORT || 3000;
 
 app.get('/', function(req, res) {
   res.sendFile(path.join(__dirname, 'index.html'));
 });
 
-const rooms = {};
-const SUITS = ['♠','♥','♦','♣'];
-const VALUES = ['A','2','3','4','5','6','7','8','9','10','J','Q','K'];
-const COLORS = ['#FF6B6B','#4ECDC4','#45B7D1','#FFA07A','#98D8C8','#F7DC6F','#BB8FCE','#85C1E2','#F8B739','#52B788'];
-const SAFE_CHARS = '23456789ABCDEFGHJKMNPQRSTUVWXYZ';
+var rooms = {};
+var SUITS = ['s','h','d','c'];
+var VALS = ['A','2','3','4','5','6','7','8','9','10','J','Q','K'];
+var COLORS = ['#FF6B6B','#4ECDC4','#45B7D1','#FFA07A','#98D8C8','#F7DC6F','#BB8FCE','#85C1E2','#F8B739','#52B788'];
+var CHARS = '23456789ABCDEFGHJKMNPQRSTUVWXYZ';
 
 function makeCode() {
   var c = '';
-  for (var i = 0; i < 6; i++) {
-    c += SAFE_CHARS[Math.floor(Math.random() * SAFE_CHARS.length)];
-  }
-  if (rooms[c]) return makeCode();
-  return c;
+  for (var i = 0; i < 6; i++) c += CHARS[Math.floor(Math.random() * CHARS.length)];
+  return rooms[c] ? makeCode() : c;
 }
 
 function makeDeck() {
   var d = [];
-  for (var si = 0; si < SUITS.length; si++) {
-    for (var vi = 0; vi < VALUES.length; vi++) {
-      d.push({ suit: SUITS[si], value: VALUES[vi] });
-    }
-  }
+  for (var i = 0; i < SUITS.length; i++)
+    for (var j = 0; j < VALS.length; j++)
+      d.push({ s: SUITS[i], v: VALS[j] });
   for (var i = d.length - 1; i > 0; i--) {
     var j = Math.floor(Math.random() * (i + 1));
-    var tmp = d[i];
-    d[i] = d[j];
-    d[j] = tmp;
+    var t = d[i]; d[i] = d[j]; d[j] = t;
   }
   return d;
 }
 
-function bjTotal(cards) {
-  var t = 0;
-  var aces = 0;
+function bjScore(cards) {
+  var t = 0, a = 0;
   for (var i = 0; i < cards.length; i++) {
-    var v = cards[i].value;
-    if (v === 'A') { t += 11; aces++; }
-    else if (v === 'K' || v === 'Q' || v === 'J') { t += 10; }
-    else { t += parseInt(v); }
+    var v = cards[i].v;
+    if (v === 'A') { t += 11; a++; }
+    else if (v === 'K' || v === 'Q' || v === 'J') t += 10;
+    else t += parseInt(v);
   }
-  while (t > 21 && aces > 0) { t -= 10; aces--; }
+  while (t > 21 && a > 0) { t -= 10; a--; }
   return t;
 }
 
-function emitState(code) {
-  var room = rooms[code];
-  if (!room) return;
-  var basePlayers = [];
-  for (var i = 0; i < room.players.length; i++) {
-    var p = room.players[i];
-    basePlayers.push({
-      id: p.id,
-      nickname: p.nickname,
-      chips: p.chips,
-      color: p.color,
-      connected: p.connected,
-      lastAction: p.lastAction,
-      folded: p.folded,
-      stood: p.stood,
-      busted: p.busted,
-      hasBlackjack: p.hasBlackjack,
-      swapped: p.swapped,
-      bjBet: p.bjBet,
-      cardCount: p.cards ? p.cards.length : 0,
-      bjTotal: (room.gameType === 'blackjack' && p.cards) ? bjTotal(p.cards) : 0
+function sendState(code) {
+  var r = rooms[code];
+  if (!r) return;
+  var plist = [];
+  for (var i = 0; i < r.players.length; i++) {
+    var p = r.players[i];
+    plist.push({
+      id: p.id, nick: p.nick, chips: p.chips, color: p.color,
+      on: p.on, act: p.act, fold: p.fold, stood: p.stood,
+      bust: p.bust, hasBJ: p.hasBJ, swapped: p.swapped,
+      bjBet: p.bjBet, nc: p.cards ? p.cards.length : 0,
+      bjT: (r.gt === 'bj' && p.cards) ? bjScore(p.cards) : 0
     });
   }
   var base = {
-    code: room.code,
-    gameType: room.gameType,
-    cardMode: room.cardMode,
-    initialChips: room.initialChips,
-    smallBlind: room.smallBlind,
-    bigBlind: room.bigBlind,
-    minBet: room.minBet,
-    maxBet: room.maxBet,
-    maxSwap: room.maxSwap,
-    started: room.started,
-    pot: room.pot,
-    handNum: room.handNum,
-    phase: room.phase,
-    communityCards: room.communityCards,
-    dealerCard: room.dealerCard,
-    history: room.history,
-    players: basePlayers
+    code: r.code, gt: r.gt, cm: r.cm, ic: r.ic,
+    sb: r.sb, bb: r.bb, mn: r.mn, mx: r.mx, ms: r.ms,
+    on: r.on, pot: r.pot, hn: r.hn, ph: r.ph,
+    cc: r.cc, dc: r.dc, hist: r.hist, players: plist
   };
-  for (var i = 0; i < room.players.length; i++) {
-    var p = room.players[i];
+  for (var i = 0; i < r.players.length; i++) {
+    var p = r.players[i];
     if (p.sid) {
-      var s = io.sockets.sockets.get(p.sid);
-      if (s) {
-        s.emit('state', {
-          code: base.code,
-          gameType: base.gameType,
-          cardMode: base.cardMode,
-          initialChips: base.initialChips,
-          smallBlind: base.smallBlind,
-          bigBlind: base.bigBlind,
-          minBet: base.minBet,
-          maxBet: base.maxBet,
-          maxSwap: base.maxSwap,
-          started: base.started,
-          pot: base.pot,
-          handNum: base.handNum,
-          phase: base.phase,
-          communityCards: base.communityCards,
-          dealerCard: base.dealerCard,
-          history: base.history,
-          players: base.players,
-          myId: p.id,
-          myCards: p.cards || [],
-          isHost: p.id === room.hostId
+      var sk = io.sockets.sockets.get(p.sid);
+      if (sk) {
+        sk.emit('S', {
+          code: base.code, gt: base.gt, cm: base.cm, ic: base.ic,
+          sb: base.sb, bb: base.bb, mn: base.mn, mx: base.mx, ms: base.ms,
+          on: base.on, pot: base.pot, hn: base.hn, ph: base.ph,
+          cc: base.cc, dc: base.dc, hist: base.hist, players: base.players,
+          me: p.id, myC: p.cards || [], host: p.id === r.hid
         });
       }
     }
   }
 }
 
-function startNewHand(room) {
-  room.handNum++;
-  room.pot = 0;
-  room.currentBet = 0;
-  room.betsThisRound = {};
-  room.communityCards = [];
-  room.dealerCard = null;
-  room.dealerCards = [];
-  room.deck = makeDeck();
-  for (var i = 0; i < room.players.length; i++) {
-    var pl = room.players[i];
-    pl.folded = false;
-    pl.stood = false;
-    pl.busted = false;
-    pl.hasBlackjack = false;
-    pl.swapped = false;
-    pl.lastAction = '';
-    pl.bjBet = 0;
-    pl.cards = [];
+function newHand(r) {
+  r.hn++;
+  r.pot = 0;
+  r.cb = 0;
+  r.bets = {};
+  r.cc = [];
+  r.dc = null;
+  r.dcs = [];
+  r.deck = makeDeck();
+  for (var i = 0; i < r.players.length; i++) {
+    var p = r.players[i];
+    p.fold = false; p.stood = false; p.bust = false;
+    p.hasBJ = false; p.swapped = false; p.act = '';
+    p.bjBet = 0; p.cards = [];
   }
-  if (room.gameType === 'texasholdem') {
-    room.phase = 'preflop';
-    if (room.cardMode === 'virtual') {
-      for (var i = 0; i < room.players.length; i++) {
-        if (room.players[i].chips > 0) {
-          room.players[i].cards = [room.deck.pop(), room.deck.pop()];
-        }
-      }
+  if (r.gt === 'th') {
+    r.ph = 'preflop';
+    if (r.cm === 'v') {
+      for (var i = 0; i < r.players.length; i++)
+        if (r.players[i].chips > 0)
+          r.players[i].cards = [r.deck.pop(), r.deck.pop()];
     }
-  } else if (room.gameType === 'blackjack') {
-    room.phase = 'betting';
-    if (room.cardMode === 'virtual') {
-      room.dealerCards = [room.deck.pop(), room.deck.pop()];
-      room.dealerCard = room.dealerCards[0];
+  } else if (r.gt === 'bj') {
+    r.ph = 'bet';
+    if (r.cm === 'v') {
+      r.dcs = [r.deck.pop(), r.deck.pop()];
+      r.dc = r.dcs[0];
     }
-  } else if (room.gameType === '5carddraw') {
-    room.phase = 'firstbet';
-    if (room.cardMode === 'virtual') {
-      for (var i = 0; i < room.players.length; i++) {
-        if (room.players[i].chips > 0) {
-          room.players[i].cards = [];
-          for (var j = 0; j < 5; j++) {
-            room.players[i].cards.push(room.deck.pop());
-          }
+  } else if (r.gt === 'dr') {
+    r.ph = 'bet1';
+    if (r.cm === 'v') {
+      for (var i = 0; i < r.players.length; i++)
+        if (r.players[i].chips > 0) {
+          r.players[i].cards = [];
+          for (var j = 0; j < 5; j++) r.players[i].cards.push(r.deck.pop());
         }
-      }
     }
   }
 }
 
-io.on('connection', function(socket) {
-  console.log('Connected: ' + socket.id);
+function findP(r, sid) {
+  for (var i = 0; i < r.players.length; i++)
+    if (r.players[i].sid === sid) return r.players[i];
+  return null;
+}
 
-  socket.on('createRoom', function(cb) {
+io.on('connection', function(socket) {
+
+  socket.on('mk', function(cb) {
     var code = makeCode();
     rooms[code] = {
-      code: code,
-      hostId: null,
-      hostSid: null,
-      players: [],
-      gameType: 'texasholdem',
-      cardMode: 'physical',
-      initialChips: 1000000,
-      smallBlind: 5000,
-      bigBlind: 10000,
-      minBet: 1000,
-      maxBet: 100000,
-      maxSwap: 4,
-      started: false,
-      pot: 0,
-      handNum: 0,
-      phase: 'waiting',
-      deck: [],
-      communityCards: [],
-      dealerCard: null,
-      dealerCards: [],
-      currentBet: 0,
-      betsThisRound: {},
-      history: [],
-      blindIndex: 0
+      code: code, hid: null, players: [],
+      gt: 'th', cm: 'p', ic: 1000000,
+      sb: 5000, bb: 10000, mn: 1000, mx: 100000, ms: 4,
+      on: false, pot: 0, hn: 0, ph: 'w',
+      deck: [], cc: [], dc: null, dcs: [],
+      cb: 0, bets: {}, hist: []
     };
-    console.log('Room created: ' + code);
     cb({ ok: true, code: code });
   });
 
-  socket.on('joinRoom', function(data, cb) {
-    var code = data.code;
-    var nickname = data.nickname;
-    var room = rooms[code];
-    if (!room) return cb({ ok: false, err: 'Stanza non trovata' });
-    if (nickname.length < 2 || nickname.length > 12) return cb({ ok: false, err: 'Nickname: 2-12 caratteri' });
+  socket.on('jn', function(d, cb) {
+    var r = rooms[d.code];
+    if (!r) return cb({ ok: false, e: 'Stanza non trovata' });
+    var nick = (d.nick || '').trim();
+    if (nick.length < 2 || nick.length > 12) return cb({ ok: false, e: 'Nick 2-12 char' });
+    var ex = null;
+    for (var i = 0; i < r.players.length; i++)
+      if (r.players[i].nick === nick) { ex = r.players[i]; break; }
+    if (ex) {
+      if (ex.on && ex.sid !== socket.id) {
+        var s2 = io.sockets.sockets.get(ex.sid);
+        if (s2) return cb({ ok: false, e: 'Nick in uso' });
+      }
+      ex.sid = socket.id; ex.on = true;
+      socket.join(d.code); socket.data = { code: d.code, nick: nick };
+      sendState(d.code); return cb({ ok: true });
+    }
+    if (r.players.length >= 10) return cb({ ok: false, e: 'Max 10' });
+    var pid = Math.random().toString(36).substr(2, 8);
+    var pl = {
+      id: pid, sid: socket.id, nick: nick,
+      chips: 0, color: COLORS[r.players.length % 10],
+      on: true, act: '', fold: false, stood: false,
+      bust: false, hasBJ: false, swapped: false,
+      bjBet: 0, cards: []
+    };
+    if (r.players.length === 0) r.hid = pid;
+    r.players.push(pl);
+    socket.join(d.code); socket.data = { code: d.code, nick: nick };
+    sendState(d.code); cb({ ok: true });
+  });
 
-    var existing = null;
-    for (var i = 0; i < room.players.length; i++) {
-      if (room.players[i].nickname === nickname) {
-        existing = room.players[i];
+  socket.on('cfg', function(d) {
+    var r = rooms[d.code];
+    if (!r || r.on) return;
+    var p = findP(r, socket.id);
+    if (!p || p.id !== r.hid) return;
+    if (d.gt) r.gt = d.gt;
+    if (d.cm) r.cm = d.cm;
+    if (d.ic) r.ic = d.ic;
+    if (d.sb !== undefined) r.sb = d.sb;
+    if (d.bb !== undefined) r.bb = d.bb;
+    if (d.mn !== undefined) r.mn = d.mn;
+    if (d.mx !== undefined) r.mx = d.mx;
+    if (d.ms !== undefined) r.ms = d.ms;
+    sendState(d.code);
+  });
+
+  socket.on('go', function(d, cb) {
+    var r = rooms[d.code];
+    if (!r) return cb({ ok: false, e: 'No room' });
+    var p = findP(r, socket.id);
+    if (!p || p.id !== r.hid) return cb({ ok: false, e: 'No auth' });
+    if (r.players.length < 2) return cb({ ok: false, e: 'Min 2' });
+    r.on = true;
+    for (var i = 0; i < r.players.length; i++) r.players[i].chips = r.ic;
+    newHand(r); sendState(d.code); cb({ ok: true });
+  });
+
+  socket.on('act', function(d, cb) {
+    var r = rooms[d.code];
+    if (!r || !r.on) return cb({ ok: false, e: 'No game' });
+    var p = findP(r, socket.id);
+    if (!p) return cb({ ok: false, e: 'No player' });
+    var amt = parseInt(d.amt) || 0;
+    var a = d.a;
+
+    if (r.gt === 'th' || r.gt === 'dr') {
+      if (p.fold || p.chips <= 0) return cb({ ok: false, e: 'Cant act' });
+      var mb = r.bets[p.id] || 0;
+      var tc = r.cb - mb;
+      if (a === 'fold') { p.fold = true; p.act = 'Fold'; }
+      else if (a === 'check') {
+        if (tc > 0) return cb({ ok: false, e: 'Must call' });
+        p.act = 'Check';
+      } else if (a === 'call') {
+        var ca = Math.min(tc, p.chips);
+        p.chips -= ca; r.pot += ca;
+        r.bets[p.id] = mb + ca;
+        p.act = 'Call ' + ca;
+      } else if (a === 'bet') {
+        if (amt <= 0 || amt > p.chips) return cb({ ok: false, e: 'Bad amt' });
+        p.chips -= amt; r.pot += amt;
+        r.cb = mb + amt; r.bets[p.id] = r.cb;
+        p.act = 'Bet ' + amt;
+      } else if (a === 'raise') {
+        if (amt <= 0) return cb({ ok: false, e: 'Bad amt' });
+        var tot = tc + amt;
+        if (tot > p.chips) return cb({ ok: false, e: 'Not enough' });
+        p.chips -= tot; r.pot += tot;
+        r.bets[p.id] = mb + tot; r.cb = r.bets[p.id];
+        p.act = 'Raise ' + amt;
+      } else if (a === 'allin') {
+        var aa = p.chips;
+        r.pot += aa; r.bets[p.id] = (r.bets[p.id] || 0) + aa;
+        if (r.bets[p.id] > r.cb) r.cb = r.bets[p.id];
+        p.chips = 0; p.act = 'All-in ' + aa;
+      } else return cb({ ok: false, e: 'Bad action' });
+    } else if (r.gt === 'bj') {
+      if (r.ph === 'bet') {
+        if (a === 'bjbet') {
+          if (amt < r.mn || amt > r.mx) return cb({ ok: false, e: 'Bet ' + r.mn + '-' + r.mx });
+          if (amt > p.chips) return cb({ ok: false, e: 'Not enough' });
+          p.chips -= amt; p.bjBet = amt; r.pot += amt;
+          p.act = 'Bet ' + amt;
+          if (r.cm === 'v' && p.cards.length === 0) {
+            p.cards = [r.deck.pop(), r.deck.pop()];
+            if (bjScore(p.cards) === 21) p.hasBJ = true;
+          }
+        }
+      } else if (r.ph === 'play') {
+        if (p.stood || p.bust || p.bjBet === 0) return cb({ ok: false, e: 'Cant' });
+        if (a === 'hit') {
+          if (r.cm === 'v') {
+            p.cards.push(r.deck.pop());
+            var t = bjScore(p.cards);
+            if (t > 21) { p.bust = true; p.act = 'Bust!'; }
+            else if (t === 21) { p.stood = true; p.act = '21!'; }
+            else p.act = 'Hit';
+          } else p.act = 'Hit';
+        } else if (a === 'stand') { p.stood = true; p.act = 'Stand'; }
+        else if (a === 'dbl') {
+          if (p.bjBet > p.chips) return cb({ ok: false, e: 'Not enough' });
+          p.chips -= p.bjBet; r.pot += p.bjBet; p.bjBet *= 2;
+          if (r.cm === 'v') {
+            p.cards.push(r.deck.pop());
+            var t = bjScore(p.cards);
+            if (t > 21) { p.bust = true; p.act = 'Dbl Bust!'; }
+            else p.act = 'Double';
+          } else p.act = 'Double';
+          p.stood = true;
+        } else if (a === 'surr') {
+          var half = Math.floor(p.bjBet / 2);
+          p.chips += half; r.pot -= half;
+          p.stood = true; p.fold = true; p.act = 'Surrender';
+        }
+      }
+    }
+    sendState(d.code); cb({ ok: true });
+  });
+
+  socket.on('swap', function(d, cb) {
+    var r = rooms[d.code];
+    if (!r || r.gt !== 'dr' || r.ph !== 'swap') return cb({ ok: false, e: 'Not swap' });
+    var p = findP(r, socket.id);
+    if (!p || p.fold || p.swapped) return cb({ ok: false, e: 'Cant' });
+    var idx = d.idx;
+    if (!Array.isArray(idx)) return cb({ ok: false, e: 'Bad data' });
+    if (idx.length > r.ms) return cb({ ok: false, e: 'Max ' + r.ms });
+    if (r.cm === 'v') {
+      for (var i = 0; i < idx.length; i++) {
+        var x = idx[i];
+        if (x >= 0 && x < p.cards.length) p.cards[x] = r.deck.pop();
+      }
+    }
+    p.swapped = true;
+    p.act = idx.length === 0 ? 'Keep all' : 'Swap ' + idx.length;
+    sendState(d.code); cb({ ok: true });
+  });
+
+  socket.on('adv', function(d, cb) {
+    var r = rooms[d.code];
+    if (!r) return cb({ ok: false, e: 'No room' });
+    var p = findP(r, socket.id);
+    if (!p || p.id !== r.hid) return cb({ ok: false, e: 'No auth' });
+    if (r.gt === 'th') {
+      r.bets = {}; r.cb = 0;
+      for (var i = 0; i < r.players.length; i++) if (!r.players[i].fold) r.players[i].act = '';
+      if (r.ph === 'preflop') {
+        r.ph = 'flop';
+        if (r.cm === 'v') { r.deck.pop(); r.cc.push(r.deck.pop(), r.deck.pop(), r.deck.pop()); }
+      } else if (r.ph === 'flop') {
+        r.ph = 'turn';
+        if (r.cm === 'v') { r.deck.pop(); r.cc.push(r.deck.pop()); }
+      } else if (r.ph === 'turn') {
+        r.ph = 'river';
+        if (r.cm === 'v') { r.deck.pop(); r.cc.push(r.deck.pop()); }
+      }
+    } else if (r.gt === 'bj') {
+      if (r.ph === 'bet') {
+        r.ph = 'play';
+        for (var i = 0; i < r.players.length; i++) {
+          if (r.players[i].bjBet === 0) r.players[i].fold = true;
+          r.players[i].act = '';
+        }
+      } else if (r.ph === 'play') {
+        r.ph = 'res';
+        for (var i = 0; i < r.players.length; i++) r.players[i].act = '';
+      }
+    } else if (r.gt === 'dr') {
+      r.bets = {}; r.cb = 0;
+      for (var i = 0; i < r.players.length; i++) if (!r.players[i].fold) r.players[i].act = '';
+      if (r.ph === 'bet1') r.ph = 'swap';
+      else if (r.ph === 'swap') r.ph = 'bet2';
+      else if (r.ph === 'bet2') r.ph = 'show';
+    }
+    sendState(d.code); cb({ ok: true });
+  });
+
+  socket.on('close', function(d, cb) {
+    var r = rooms[d.code];
+    if (!r) return cb({ ok: false, e: 'No room' });
+    var p = findP(r, socket.id);
+    if (!p || p.id !== r.hid) return cb({ ok: false, e: 'No auth' });
+    var res = d.res;
+    if (r.gt === 'bj') {
+      if (!res || !Array.isArray(res)) return cb({ ok: false, e: 'No results' });
+      var wn = [];
+      for (var i = 0; i < res.length; i++) {
+        var pl = null;
+        for (var j = 0; j < r.players.length; j++)
+          if (r.players[j].id === res[i].id) { pl = r.players[j]; break; }
+        if (!pl) continue;
+        if (res[i].r === 'w') { pl.chips += pl.bjBet * 2; wn.push(pl.nick); }
+        else if (res[i].r === 'bj') { pl.chips += Math.floor(pl.bjBet * 2.5); wn.push(pl.nick); }
+        else if (res[i].r === 'p') { pl.chips += pl.bjBet; }
+      }
+      r.hist.unshift({ h: r.hn, w: wn.length > 0 ? wn.join(', ') : 'Banco', p: r.pot, t: new Date().toLocaleTimeString('it') });
+    } else {
+      if (!res || !Array.isArray(res) || res.length === 0) return cb({ ok: false, e: 'Pick winner' });
+      var share = Math.floor(r.pot / res.length);
+      var rem = r.pot % res.length;
+      var wn = [];
+      for (var i = 0; i < res.length; i++) {
+        for (var j = 0; j < r.players.length; j++) {
+          if (r.players[j].id === res[i]) {
+            r.players[j].chips += share + (i === 0 ? rem : 0);
+            wn.push(r.players[j].nick);
+          }
+        }
+      }
+      r.hist.unshift({ h: r.hn, w: wn.join(', '), p: r.pot, t: new Date().toLocaleTimeString('it') });
+    }
+    r.pot = 0;
+    newHand(r); sendState(d.code); cb({ ok: true });
+  });
+
+  socket.on('end', function(d, cb) {
+    var r = rooms[d.code];
+    if (!r) return cb({ ok: false, e: 'No room' });
+    var p = findP(r, socket.id);
+    if (!p || p.id !== r.hid) return cb({ ok: false, e: 'No auth' });
+    var st = [];
+    for (var i = 0; i < r.players.length; i++) {
+      var pl = r.players[i];
+      st.push({ nick: pl.nick, chips: pl.chips, diff: pl.chips - r.ic, color: pl.color });
+    }
+    st.sort(function(a, b) { return b.chips - a.chips; });
+    io.to(d.code).emit('over', { st: st });
+    delete rooms[d.code];
+    cb({ ok: true });
+  });
+
+  socket.on('disconnect', function() {
+    if (!socket.data) return;
+    var r = rooms[socket.data.code];
+    if (!r) return;
+    for (var i = 0; i < r.players.length; i++) {
+      if (r.players[i].nick === socket.data.nick) {
+        r.players[i].on = false;
+        if (r.players[i].id === r.hid) io.to(r.code).emit('hp');
         break;
       }
     }
-
-    if (existing) {
-      if (existing.connected && existing.sid !== socket.id) {
-        var existingSocket = io.sockets.sockets.get(existing.sid);
-        if (existingSocket) return cb({ ok: false, err: 'Nickname già in uso' });
-      }
-      existing.sid = socket.id;
-      existing.connected = true;
-      socket.join(code);
-      socket.data = { code: code, nickname: nickname };
-      emitState(code);
-      return cb({ ok: true });
-    }
-
-    if (room.players.length >= 10) return cb({ ok: false, err: 'Stanza piena (max 10)' });
-
-    var pid = Math.random().toString(36).substring(2, 10);
-    var player = {
-      id: pid,
-      sid: socket.id,
-      nickname: nickname,
-      chips: 0,
-      color: COLORS[room.players.length % COLORS.length],
-      connected: true,
-      lastAction: '',
-      folded: false,
-      stood: false,
-      busted: false,
-      hasBlackjack: false,
-      swapped: false,
-      bjBet: 0,
-      cards: []
-    };
-
-    if (room.players.length === 0) {
-      room.hostId = pid;
-      room.hostSid = socket.id;
-    }
-
-    room.players.push(player);
-    socket.join(code);
-    socket.data = { code: code, nickname: nickname };
-    console.log(nickname + ' joined room ' + code);
-    emitState(code);
-    cb({ ok: true });
+    sendState(socket.data.code);
   });
+});
 
-  socket.on('configure', function(data) {
-    var room = rooms[data.code];
-    if (!room || room.started) return;
-    var p = null;
-    for (var i = 0; i < room.players.length; i++) {
-      if (room.players[i].sid === socket.id) { p = room.players[i]; break; }
-    }
-    if (!p || p.id !== room.hostId) return;
-    if (data.gameType) room.gameType = data.gameType;
-    if (data.cardMode) room.cardMode = data.cardMode;
-    if (data.initialChips) room.initialChips = data.initialChips;
-    if (data.smallBlind !== undefined) room.smallBlind = data.smallBlind;
-    if (data.bigBlind !== undefined) room.bigBlind = data.bigBlind;
-    if (data.minBet !== undefined) room.minBet = data.minBet;
-    if (data.maxBet !== undefined) room.maxBet = data.maxBet;
-    if (data.maxSwap !== undefined) room.maxSwap = data.maxSwap;
-    emitState(data.code);
-  });
-
-  socket.on('startGame', function(data, cb) {
-    var room = rooms[data.code];
-    if (!room) return cb({ ok: false, err: 'Stanza non trovata' });
-    var p = null;
-    for (var i = 0; i < room.players.length; i++) {
-      if (room.players[i].sid === socket.id) { p = room.players[i]; break; }
-    }
-    if (!p || p.id !== room.hostId) return cb({ ok: false, err: 'Non autorizzato' });
-    if (room.players.length < 2) return cb({ ok: false, err: 'Servono almeno 2 giocatori' });
-    room.started = true;
-    for (var i = 0; i < room.players.length; i++) {
-      room.players[i].chips = room.initialChips;
-    }
-    startNewHand(room);
-    emitState(data.code);
-    cb({ ok: true });
-  });
-
-  socket.on('action', function(data, cb) {
-    var room = rooms[data.code];
-    if (!room || !room.started) return cb({ ok: false, err: 'Gioco non avviato' });
-    var player = null;
-    for (var i = 0; i < room.players.length; i++) {
-      if (room.players[i].sid === socket.id) { player = room.players[i]; break; }
-    }
-    if (!player) return cb({ ok: false, err: 'Non trovato' });
-    var amount = parseInt(data.amount) || 0;
-    var action = data.action;
-
-    if (room.gameType === 'texasholdem' || room.gameType === '5carddraw') {
-      if (player.folded || player.chips <= 0) return cb({ ok: false, err: 'Non puoi agire' });
-      var myBet = room.betsThisRound[player.id] || 0;
-      var toCall = room.currentBet - myBet;
-
-      if (action === 'fold') {
-        player.folded = true;
-        player.lastAction = 'Fold';
-      } else if (action === 'check') {
-        if (toCall > 0) return cb({ ok: false, err: 'Devi fare Call o Fold' });
-        player.lastAction = 'Check';
-      } else if (action === 'call') {
-        var callAmt = Math.min(toCall, player.chips);
-        player.chips -= callAmt;
-        room.pot += callAmt;
-        room.betsThisRound[player.id] = myBet + callAmt;
-        player.lastAction = 'Call ' + callAmt.toLocaleString('it');
-      } else if (action === 'bet') {
-        if (amount <= 0 || amount > player.chips) return cb({ ok: false, err: 'Importo non valido' });
-        player.chips -= amount;
-        room.pot += amount;
-        room.currentBet = myBet + amount;
-        room.betsThisRound[player.id] = room.currentBet;
-        player.lastAction = 'Bet ' + amount.toLocaleString('it');
-      } else if (action === 'raise') {
-        if (amount <= 0 || amount > player.chips) return cb({ ok: false, err: 'Importo non valido' });
-        var totalPut = toCall + amount;
-        if (totalPut > player.chips) return cb({ ok: false, err: 'Fiches insufficienti' });
-        player.chips -= totalPut;
-        room.pot += totalPut;
-        room.betsThisRound[player.id] = myBet + totalPut;
-        room.currentBet = room.betsThisRound[player.id];
-        player.lastAction = 'Raise ' + amount.toLocaleString('it');
-      } else if (action === 'allin') {
-        var allAmt = player.chips;
-        room.pot += allAmt;
-        room.betsThisRound[player.id] = (room.betsThisRound[player.id] || 0) + allAmt;
-        if (room.betsThisRound[player.id] > room.currentBet) {
-          room.currentBet = room.betsThisRound[player.id];
-        }
-        player.chips = 0;
-        player.lastAction = 'All-in ' + allAmt.toLocaleString('it');
-      } else {
-        return cb({ ok: false, err: 'Azione non valida' });
-      }
-    } else if (room.gameType === 'blackjack') {
-      if (room.phase === 'betting') {
-        if (action === 'bjbet') {
-          if (amount < room.minBet || amount > room.maxBet) return cb({ ok: false, err: 'Puntata tra ' + room.minBet.toLocaleString('it') + ' e ' + room.maxBet.toLocaleString('it') });
-          if (amount > player.chips) return cb({ ok: false, err: 'Fiches insufficienti' });
-          player.chips -= amount;
-          player.bjBet = amount;
-          room.pot += amount;
-          player.lastAction = 'Bet ' + amount.toLocaleString('it');
-          if (room.cardMode === 'virtual' && player.cards.length === 0) {
-            player.cards = [room.deck.pop(), room.deck.pop()];
-            if (bjTotal(player.cards) === 21) player.hasBlackjack = true;
-          }
-        }
-      } else if (room.phase === 'playing') {
-        if (player.stood || player.busted || player.bjBet === 0) return cb({ ok: false, err: 'Non puoi agire' });
-        if (action === 'hit') {
-          if (room.cardMode === 'virtual') {
-            player.cards.push(room.deck.pop());
-            var t = bjTotal(player.cards);
-            if (t > 21) { player.busted = true; player.lastAction = 'Bust!'; }
-            else if (t === 21) { player.stood = true; player.lastAction = 'Stand (21)'; }
-            else { player.lastAction = 'Hit'; }
-          } else {
-            player.lastAction = 'Hit';
-          }
-        } else if (action === 'stand') {
-          player.stood = true;
-          player.lastAction = 'Stand';
-        } else if (action === 'doubledown') {
-          if (player.bjBet > player.chips) return cb({ ok: false, err: 'Fiches insufficienti' });
-          player.chips -= player.bjBet;
-          room.pot += player.bjBet;
-          player.bjBet = player.bjBet * 2;
-          if (room.cardMode === 'virtual') {
-            player.cards.push(room.deck.pop());
-            var t = bjTotal(player.cards);
-            if (t > 21) { player.busted = true; player.lastAction = 'Double - Bust!'; }
-            else { player.lastAction = 'Double Down'; }
-          } else {
-            player.lastAction = 'Double Down';
-          }
-          player.stood = true;
-        } else if (action === 'surrender') {
-          var half = Math.floor(player.bjBet / 2);
-          player.chips += half;
-          room.pot -= half;
-          player.stood = true;
-          player.folded = true;
-          player.lastAction = 'Surrender';
-        }
-      }
-    }
-
-    emitState(data.code);
-    cb({ ok: true });
-  });
-
-  socket.on('swapCards', function(data, cb) {
-    var room = rooms[data.code];
-    if (!room || room.gameType !== '5carddraw' || room.phase !== 'swap') return cb({ ok: false, err: 'Non in fase scambio' });
-    var player = null;
-    for (var i = 0; i < room.players.length; i++) {
-      if (room.players[i].sid === socket.id) { player = room.players[i]; break; }
-    }
-    if (!player || player.folded || player.swapped) return cb({ ok: false, err: 'Non puoi scambiare' });
-    var indices = data.indices;
-    if (!Array.isArray(indices)) return cb({ ok: false, err: 'Dati non validi' });
-    if (indices.length > room.maxSwap) return cb({ ok: false, err: 'Max ' + room.maxSwap + ' carte' });
-    if (room.cardMode === 'virtual') {
-      for (var i = 0; i < indices.length; i++) {
-        var idx = indices[i];
-        if (idx >= 0 && idx < player.cards.length) {
-          player.cards[idx] = room.deck.pop();
-        }
-      }
-    }
-    player.swapped = true;
-    player.lastAction = indices.length === 0 ? 'Mantiene tutte' : 'Scambia ' + indices.length;
-    emitState(data.code);
-    cb({ ok: true });
-  });
-
-  socket.on('hostAdvancePhase', function(data, cb) {
-    var room = rooms[data.code];
-    if (!room) return cb({ ok: false, err: 'Stanza non trovata' });
-    var p = null;
-    for (var i = 0; i < room.players.length; i++) {
-      if (room.players[i].sid === socket.id) { p = room.players[i]; break; }
-    }
-    if (!p || p.id !== room.hostId) return cb({ ok: false, err: 'Non autorizzato' });
-
-    if (room.gameType === 'texasholdem') {
-      room.betsThisRound = {};
-      room.currentBet = 0;
-      for (var i = 0; i < room.players.length; i++) {
-        if (!room.players[i].folded) room.players[i].lastAction = '';
-      }
-      if (room.phase === 'preflop') {
-        room.phase = 'flop';
-        if (room.cardMode === 'virtual') {
-          room.deck.pop();
-          room.communityCards.push(room.deck.pop(), room.deck.pop(), room.deck.pop());
-        }
-      } else if (room.phase === 'flop') {
-        room.phase = 'turn';
-        if (room.cardMode === 'virtual') {
-          room.deck.pop();
-          room.communityCards.push(room.deck.pop());
-        }
-      } else if (room.phase === 'turn') {
-        room.phase = 'river';
-        if (room.cardMode === 'virtual') {
-          room.deck.pop();
-          room.communityCards.push(room.deck.pop());
-        }
-      }
-    } else if (room.gameType === 'blackjack') {
-      if (room.phase === 'betting') {
-        room.phase = 'playing';
-        for (var i = 0; i < room.players.length; i++) {
-          if (room.players[i].bjBet === 0) room.players[i].folded = true;
-          room.players[i].lastAction = '';
-        }
-      } else if (room.phase === 'playing') {
-        room.phase = 'results';
-        for (var i = 0; i < room.players.length; i++) {
-          room.players[i].lastAction = '';
-        }
-      }
-    } else if (room.gameType === '5carddraw') {
-      room.betsThisRound = {};
-      room.currentBet = 0;
-      for (var i = 0; i < room.players.length; i++) {
-        if (!room.players[i].folded) room.players[i].lastAction = '';
-      }
-      if (room.phase === 'firstbet') {
-        room.phase = 'swap';
-      } else if (room.phase === 'swap') {
-        room.phase = 'secondbet';
-      } else if (room.phase === 'secondbet') {
-        room.phase = 'showdown';
-      }
-    }
-    emitState(data.code);
-    cb({ ok: true });
-  });
-
-  socket.on('closeHand', function(data, cb) {
-    var room = rooms[data.code];
-    if (!room) return cb({ ok: false, err: 'Stanza non trovata' });
-    var p = null;
-    for (var i = 0; i < room.players.length; i++) {
-      if (room.players[i].sid === socket.id) { p = room.players[i]; break; }
-    }
-    if (!p || p.id !== room.hostId) return cb({ ok: false, err: 'Non autorizzato' });
-
-    var results = data.results;
-
-    if (room.gameType === 'blackjack') {
-      if (!results || !Array.isArray(results)) return cb({ ok: false, err: 'Risultati mancanti' });
-      var winnerNames = [];
-      for (var i = 0; i < results.length; i++) {
-        var r = results[i];
-        var pl = null;
-        for (var j = 0; j < room.players.length; j++) {
-          if (room.players[j].id === r.id) { pl = room.players[j]; break; }
-        }
-        if (!pl) continue;
-        if (r.result === 'win') {
-          pl.chips += pl.bjBet * 2;
-          pl.lastAction = 'Vince!';
-          winnerNames.push(pl.nickname);
-        } else if (r.result === 'blackjack') {
-          pl.chips += Math.floor(pl.bjBet * 2.5);
-          pl.lastAction = 'Blackjack!';
-          winnerNames.push(pl.nickname + ' (BJ)');
-        } else if (r.result === 'push') {
-          pl.chips += pl.bjBet;
-          pl.lastAction = 'Push';
-        } else {
-          pl.lastAction = 'Perde';
-        }
-      }
-      room.history.unshift({
-        hand: room.handNum,
-        winners: winnerNames.length > 0 ? winnerNames.join(', ') : 'Banco',
-        pot: room.pot,
-        time: new Date().toLocaleTimeString('it')
-      });
-    } else {
-      if (!results || !Array.isArray(results) || results.length === 0) return cb({ ok: false, err: 'Seleziona almeno un vincitore' });
-      var share = Math.floor(room.pot / results.length);
-      var rem = room.pot % results.length;
-      var winnerNames = [];
-      for (var i = 0; i < results.length; i++) {
-        var pl = null;
-        for (var j = 0; j < room.players.length; j++) {
-          if (room.players[j].id === results[i]) { pl = room.players[j]; break; }
-        }
-        if (pl) {
-          pl.chips += share + (i === 0 ? rem : 0);
-          winnerNames.push(pl.nickname);
-        }
-      }
-      room.history.unshift({
-        hand: room.handNum,
-        winners: winnerNames.join(', '),
-        pot: room.pot,
-       
+server.listen(PORT, '0.0.0.0', function() {
+  console.log('OK port ' + PORT);
+});
