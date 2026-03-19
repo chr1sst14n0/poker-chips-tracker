@@ -1,14 +1,17 @@
 const express = require('express');
 const http = require('http');
-const { Server } = require('socket.io');
 const path = require('path');
-
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server);
+const { Server } = require('socket.io');
+const io = new Server(server, {
+  cors: { origin: '*' }
+});
 const PORT = process.env.PORT || 3000;
 
-app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
+app.get('/', function(req, res) {
+  res.sendFile(path.join(__dirname, 'index.html'));
+});
 
 const rooms = {};
 const SUITS = ['♠','♥','♦','♣'];
@@ -17,45 +20,67 @@ const COLORS = ['#FF6B6B','#4ECDC4','#45B7D1','#FFA07A','#98D8C8','#F7DC6F','#BB
 const SAFE_CHARS = '23456789ABCDEFGHJKMNPQRSTUVWXYZ';
 
 function makeCode() {
-  let c = '';
-  for (let i = 0; i < 6; i++) c += SAFE_CHARS[Math.floor(Math.random() * SAFE_CHARS.length)];
-  return rooms[c] ? makeCode() : c;
+  var c = '';
+  for (var i = 0; i < 6; i++) {
+    c += SAFE_CHARS[Math.floor(Math.random() * SAFE_CHARS.length)];
+  }
+  if (rooms[c]) return makeCode();
+  return c;
 }
 
 function makeDeck() {
-  const d = [];
-  for (const s of SUITS) for (const v of VALUES) d.push({ suit: s, value: v });
-  for (let i = d.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [d[i], d[j]] = [d[j], d[i]]; }
+  var d = [];
+  for (var si = 0; si < SUITS.length; si++) {
+    for (var vi = 0; vi < VALUES.length; vi++) {
+      d.push({ suit: SUITS[si], value: VALUES[vi] });
+    }
+  }
+  for (var i = d.length - 1; i > 0; i--) {
+    var j = Math.floor(Math.random() * (i + 1));
+    var tmp = d[i];
+    d[i] = d[j];
+    d[j] = tmp;
+  }
   return d;
 }
 
-function cardScore(card) {
-  if (card.value === 'A') return 11;
-  if (['K','Q','J'].includes(card.value)) return 10;
-  return parseInt(card.value);
-}
-
 function bjTotal(cards) {
-  let t = 0, aces = 0;
-  for (const c of cards) { const s = cardScore(c); t += s; if (c.value === 'A') aces++; }
+  var t = 0;
+  var aces = 0;
+  for (var i = 0; i < cards.length; i++) {
+    var v = cards[i].value;
+    if (v === 'A') { t += 11; aces++; }
+    else if (v === 'K' || v === 'Q' || v === 'J') { t += 10; }
+    else { t += parseInt(v); }
+  }
   while (t > 21 && aces > 0) { t -= 10; aces--; }
   return t;
 }
 
-function getRoom(code) { return rooms[code] || null; }
-
-function getPlayerBySocket(room, sid) {
-  return room.players.find(p => p.sid === sid) || null;
-}
-
-function getPlayerByNick(room, nick) {
-  return room.players.find(p => p.nickname === nick) || null;
-}
-
 function emitState(code) {
-  const room = rooms[code];
+  var room = rooms[code];
   if (!room) return;
-  const base = {
+  var basePlayers = [];
+  for (var i = 0; i < room.players.length; i++) {
+    var p = room.players[i];
+    basePlayers.push({
+      id: p.id,
+      nickname: p.nickname,
+      chips: p.chips,
+      color: p.color,
+      connected: p.connected,
+      lastAction: p.lastAction,
+      folded: p.folded,
+      stood: p.stood,
+      busted: p.busted,
+      hasBlackjack: p.hasBlackjack,
+      swapped: p.swapped,
+      bjBet: p.bjBet,
+      cardCount: p.cards ? p.cards.length : 0,
+      bjTotal: (room.gameType === 'blackjack' && p.cards) ? bjTotal(p.cards) : 0
+    });
+  }
+  var base = {
     code: room.code,
     gameType: room.gameType,
     cardMode: room.cardMode,
@@ -72,41 +97,97 @@ function emitState(code) {
     communityCards: room.communityCards,
     dealerCard: room.dealerCard,
     history: room.history,
-    players: room.players.map(p => ({
-      id: p.id,
-      nickname: p.nickname,
-      chips: p.chips,
-      color: p.color,
-      connected: p.connected,
-      lastAction: p.lastAction,
-      folded: p.folded,
-      stood: p.stood,
-      busted: p.busted,
-      hasBlackjack: p.hasBlackjack,
-      swapped: p.swapped,
-      bjBet: p.bjBet,
-      cardCount: p.cards ? p.cards.length : 0,
-      bjTotal: (room.gameType === 'blackjack' && p.cards) ? bjTotal(p.cards) : 0
-    }))
+    players: basePlayers
   };
-  for (const p of room.players) {
-    if (p.sid && io.sockets.sockets.get(p.sid)) {
-      io.to(p.sid).emit('state', {
-        ...base,
-        myId: p.id,
-        myCards: p.cards || [],
-        isHost: p.id === room.hostId
-      });
+  for (var i = 0; i < room.players.length; i++) {
+    var p = room.players[i];
+    if (p.sid) {
+      var s = io.sockets.sockets.get(p.sid);
+      if (s) {
+        s.emit('state', {
+          code: base.code,
+          gameType: base.gameType,
+          cardMode: base.cardMode,
+          initialChips: base.initialChips,
+          smallBlind: base.smallBlind,
+          bigBlind: base.bigBlind,
+          minBet: base.minBet,
+          maxBet: base.maxBet,
+          maxSwap: base.maxSwap,
+          started: base.started,
+          pot: base.pot,
+          handNum: base.handNum,
+          phase: base.phase,
+          communityCards: base.communityCards,
+          dealerCard: base.dealerCard,
+          history: base.history,
+          players: base.players,
+          myId: p.id,
+          myCards: p.cards || [],
+          isHost: p.id === room.hostId
+        });
+      }
     }
   }
 }
 
-io.on('connection', socket => {
+function startNewHand(room) {
+  room.handNum++;
+  room.pot = 0;
+  room.currentBet = 0;
+  room.betsThisRound = {};
+  room.communityCards = [];
+  room.dealerCard = null;
+  room.dealerCards = [];
+  room.deck = makeDeck();
+  for (var i = 0; i < room.players.length; i++) {
+    var pl = room.players[i];
+    pl.folded = false;
+    pl.stood = false;
+    pl.busted = false;
+    pl.hasBlackjack = false;
+    pl.swapped = false;
+    pl.lastAction = '';
+    pl.bjBet = 0;
+    pl.cards = [];
+  }
+  if (room.gameType === 'texasholdem') {
+    room.phase = 'preflop';
+    if (room.cardMode === 'virtual') {
+      for (var i = 0; i < room.players.length; i++) {
+        if (room.players[i].chips > 0) {
+          room.players[i].cards = [room.deck.pop(), room.deck.pop()];
+        }
+      }
+    }
+  } else if (room.gameType === 'blackjack') {
+    room.phase = 'betting';
+    if (room.cardMode === 'virtual') {
+      room.dealerCards = [room.deck.pop(), room.deck.pop()];
+      room.dealerCard = room.dealerCards[0];
+    }
+  } else if (room.gameType === '5carddraw') {
+    room.phase = 'firstbet';
+    if (room.cardMode === 'virtual') {
+      for (var i = 0; i < room.players.length; i++) {
+        if (room.players[i].chips > 0) {
+          room.players[i].cards = [];
+          for (var j = 0; j < 5; j++) {
+            room.players[i].cards.push(room.deck.pop());
+          }
+        }
+      }
+    }
+  }
+}
 
-  socket.on('createRoom', (cb) => {
-    const code = makeCode();
+io.on('connection', function(socket) {
+  console.log('Connected: ' + socket.id);
+
+  socket.on('createRoom', function(cb) {
+    var code = makeCode();
     rooms[code] = {
-      code,
+      code: code,
       hostId: null,
       hostSid: null,
       players: [],
@@ -131,32 +212,45 @@ io.on('connection', socket => {
       history: [],
       blindIndex: 0
     };
-    cb({ ok: true, code });
+    console.log('Room created: ' + code);
+    cb({ ok: true, code: code });
   });
 
-  socket.on('joinRoom', ({ code, nickname }, cb) => {
-    const room = getRoom(code);
+  socket.on('joinRoom', function(data, cb) {
+    var code = data.code;
+    var nickname = data.nickname;
+    var room = rooms[code];
     if (!room) return cb({ ok: false, err: 'Stanza non trovata' });
     if (nickname.length < 2 || nickname.length > 12) return cb({ ok: false, err: 'Nickname: 2-12 caratteri' });
 
-    const existing = getPlayerByNick(room, nickname);
+    var existing = null;
+    for (var i = 0; i < room.players.length; i++) {
+      if (room.players[i].nickname === nickname) {
+        existing = room.players[i];
+        break;
+      }
+    }
+
     if (existing) {
-      if (existing.connected && existing.sid !== socket.id) return cb({ ok: false, err: 'Nickname già in uso' });
+      if (existing.connected && existing.sid !== socket.id) {
+        var existingSocket = io.sockets.sockets.get(existing.sid);
+        if (existingSocket) return cb({ ok: false, err: 'Nickname già in uso' });
+      }
       existing.sid = socket.id;
       existing.connected = true;
       socket.join(code);
-      socket.data = { code, nickname };
+      socket.data = { code: code, nickname: nickname };
       emitState(code);
       return cb({ ok: true });
     }
 
     if (room.players.length >= 10) return cb({ ok: false, err: 'Stanza piena (max 10)' });
 
-    const pid = Math.random().toString(36).substring(2, 10);
-    const player = {
+    var pid = Math.random().toString(36).substring(2, 10);
+    var player = {
       id: pid,
       sid: socket.id,
-      nickname,
+      nickname: nickname,
       chips: 0,
       color: COLORS[room.players.length % COLORS.length],
       connected: true,
@@ -177,108 +271,73 @@ io.on('connection', socket => {
 
     room.players.push(player);
     socket.join(code);
-    socket.data = { code, nickname };
+    socket.data = { code: code, nickname: nickname };
+    console.log(nickname + ' joined room ' + code);
     emitState(code);
     cb({ ok: true });
   });
 
-  socket.on('configure', ({ code, gameType, cardMode, initialChips, smallBlind, bigBlind, minBet, maxBet, maxSwap }) => {
-    const room = getRoom(code);
+  socket.on('configure', function(data) {
+    var room = rooms[data.code];
     if (!room || room.started) return;
-    const p = getPlayerBySocket(room, socket.id);
+    var p = null;
+    for (var i = 0; i < room.players.length; i++) {
+      if (room.players[i].sid === socket.id) { p = room.players[i]; break; }
+    }
     if (!p || p.id !== room.hostId) return;
-    room.gameType = gameType || room.gameType;
-    room.cardMode = cardMode || room.cardMode;
-    room.initialChips = initialChips || room.initialChips;
-    room.smallBlind = smallBlind !== undefined ? smallBlind : room.smallBlind;
-    room.bigBlind = bigBlind !== undefined ? bigBlind : room.bigBlind;
-    room.minBet = minBet !== undefined ? minBet : room.minBet;
-    room.maxBet = maxBet !== undefined ? maxBet : room.maxBet;
-    room.maxSwap = maxSwap !== undefined ? maxSwap : room.maxSwap;
-    emitState(code);
+    if (data.gameType) room.gameType = data.gameType;
+    if (data.cardMode) room.cardMode = data.cardMode;
+    if (data.initialChips) room.initialChips = data.initialChips;
+    if (data.smallBlind !== undefined) room.smallBlind = data.smallBlind;
+    if (data.bigBlind !== undefined) room.bigBlind = data.bigBlind;
+    if (data.minBet !== undefined) room.minBet = data.minBet;
+    if (data.maxBet !== undefined) room.maxBet = data.maxBet;
+    if (data.maxSwap !== undefined) room.maxSwap = data.maxSwap;
+    emitState(data.code);
   });
 
-  socket.on('startGame', ({ code }, cb) => {
-    const room = getRoom(code);
+  socket.on('startGame', function(data, cb) {
+    var room = rooms[data.code];
     if (!room) return cb({ ok: false, err: 'Stanza non trovata' });
-    const p = getPlayerBySocket(room, socket.id);
+    var p = null;
+    for (var i = 0; i < room.players.length; i++) {
+      if (room.players[i].sid === socket.id) { p = room.players[i]; break; }
+    }
     if (!p || p.id !== room.hostId) return cb({ ok: false, err: 'Non autorizzato' });
     if (room.players.length < 2) return cb({ ok: false, err: 'Servono almeno 2 giocatori' });
     room.started = true;
-    room.players.forEach(pl => { pl.chips = room.initialChips; });
+    for (var i = 0; i < room.players.length; i++) {
+      room.players[i].chips = room.initialChips;
+    }
     startNewHand(room);
-    emitState(code);
+    emitState(data.code);
     cb({ ok: true });
   });
 
-  function startNewHand(room) {
-    room.handNum++;
-    room.pot = 0;
-    room.currentBet = 0;
-    room.betsThisRound = {};
-    room.communityCards = [];
-    room.dealerCard = null;
-    room.dealerCards = [];
-    room.deck = makeDeck();
-    room.players.forEach(pl => {
-      pl.folded = false;
-      pl.stood = false;
-      pl.busted = false;
-      pl.hasBlackjack = false;
-      pl.swapped = false;
-      pl.lastAction = '';
-      pl.bjBet = 0;
-      pl.cards = [];
-    });
-
-    if (room.gameType === 'texasholdem') {
-      room.phase = 'preflop';
-      if (room.cardMode === 'virtual') {
-        room.players.forEach(pl => {
-          if (pl.chips > 0) {
-            pl.cards = [room.deck.pop(), room.deck.pop()];
-          }
-        });
-      }
-    } else if (room.gameType === 'blackjack') {
-      room.phase = 'betting';
-      if (room.cardMode === 'virtual') {
-        room.dealerCards = [room.deck.pop(), room.deck.pop()];
-        room.dealerCard = room.dealerCards[0];
-      }
-    } else if (room.gameType === '5carddraw') {
-      room.phase = 'firstbet';
-      if (room.cardMode === 'virtual') {
-        room.players.forEach(pl => {
-          if (pl.chips > 0) {
-            pl.cards = [];
-            for (let i = 0; i < 5; i++) pl.cards.push(room.deck.pop());
-          }
-        });
-      }
-    }
-  }
-
-  socket.on('action', ({ code, action, amount }, cb) => {
-    const room = getRoom(code);
+  socket.on('action', function(data, cb) {
+    var room = rooms[data.code];
     if (!room || !room.started) return cb({ ok: false, err: 'Gioco non avviato' });
-    const player = getPlayerBySocket(room, socket.id);
+    var player = null;
+    for (var i = 0; i < room.players.length; i++) {
+      if (room.players[i].sid === socket.id) { player = room.players[i]; break; }
+    }
     if (!player) return cb({ ok: false, err: 'Non trovato' });
-    amount = parseInt(amount) || 0;
+    var amount = parseInt(data.amount) || 0;
+    var action = data.action;
 
     if (room.gameType === 'texasholdem' || room.gameType === '5carddraw') {
       if (player.folded || player.chips <= 0) return cb({ ok: false, err: 'Non puoi agire' });
-      const myBet = room.betsThisRound[player.id] || 0;
-      const toCall = room.currentBet - myBet;
+      var myBet = room.betsThisRound[player.id] || 0;
+      var toCall = room.currentBet - myBet;
 
       if (action === 'fold') {
         player.folded = true;
         player.lastAction = 'Fold';
       } else if (action === 'check') {
-        if (toCall > 0) return cb({ ok: false, err: 'Non puoi check, devi call' });
+        if (toCall > 0) return cb({ ok: false, err: 'Devi fare Call o Fold' });
         player.lastAction = 'Check';
       } else if (action === 'call') {
-        const callAmt = Math.min(toCall, player.chips);
+        var callAmt = Math.min(toCall, player.chips);
         player.chips -= callAmt;
         room.pot += callAmt;
         room.betsThisRound[player.id] = myBet + callAmt;
@@ -287,12 +346,12 @@ io.on('connection', socket => {
         if (amount <= 0 || amount > player.chips) return cb({ ok: false, err: 'Importo non valido' });
         player.chips -= amount;
         room.pot += amount;
-        room.currentBet = (room.betsThisRound[player.id] || 0) + amount;
+        room.currentBet = myBet + amount;
         room.betsThisRound[player.id] = room.currentBet;
         player.lastAction = 'Bet ' + amount.toLocaleString('it');
       } else if (action === 'raise') {
         if (amount <= 0 || amount > player.chips) return cb({ ok: false, err: 'Importo non valido' });
-        const totalPut = toCall + amount;
+        var totalPut = toCall + amount;
         if (totalPut > player.chips) return cb({ ok: false, err: 'Fiches insufficienti' });
         player.chips -= totalPut;
         room.pot += totalPut;
@@ -300,10 +359,12 @@ io.on('connection', socket => {
         room.currentBet = room.betsThisRound[player.id];
         player.lastAction = 'Raise ' + amount.toLocaleString('it');
       } else if (action === 'allin') {
-        const allAmt = player.chips;
+        var allAmt = player.chips;
         room.pot += allAmt;
         room.betsThisRound[player.id] = (room.betsThisRound[player.id] || 0) + allAmt;
-        if (room.betsThisRound[player.id] > room.currentBet) room.currentBet = room.betsThisRound[player.id];
+        if (room.betsThisRound[player.id] > room.currentBet) {
+          room.currentBet = room.betsThisRound[player.id];
+        }
         player.chips = 0;
         player.lastAction = 'All-in ' + allAmt.toLocaleString('it');
       } else {
@@ -312,18 +373,15 @@ io.on('connection', socket => {
     } else if (room.gameType === 'blackjack') {
       if (room.phase === 'betting') {
         if (action === 'bjbet') {
-          if (amount < room.minBet || amount > room.maxBet) return cb({ ok: false, err: `Puntata tra ${room.minBet.toLocaleString('it')} e ${room.maxBet.toLocaleString('it')}` });
+          if (amount < room.minBet || amount > room.maxBet) return cb({ ok: false, err: 'Puntata tra ' + room.minBet.toLocaleString('it') + ' e ' + room.maxBet.toLocaleString('it') });
           if (amount > player.chips) return cb({ ok: false, err: 'Fiches insufficienti' });
           player.chips -= amount;
           player.bjBet = amount;
           room.pot += amount;
           player.lastAction = 'Bet ' + amount.toLocaleString('it');
-          if (room.cardMode === 'virtual') {
-            if (player.cards.length === 0) {
-              player.cards = [room.deck.pop(), room.deck.pop()];
-              const t = bjTotal(player.cards);
-              if (t === 21) player.hasBlackjack = true;
-            }
+          if (room.cardMode === 'virtual' && player.cards.length === 0) {
+            player.cards = [room.deck.pop(), room.deck.pop()];
+            if (bjTotal(player.cards) === 21) player.hasBlackjack = true;
           }
         }
       } else if (room.phase === 'playing') {
@@ -331,7 +389,7 @@ io.on('connection', socket => {
         if (action === 'hit') {
           if (room.cardMode === 'virtual') {
             player.cards.push(room.deck.pop());
-            const t = bjTotal(player.cards);
+            var t = bjTotal(player.cards);
             if (t > 21) { player.busted = true; player.lastAction = 'Bust!'; }
             else if (t === 21) { player.stood = true; player.lastAction = 'Stand (21)'; }
             else { player.lastAction = 'Hit'; }
@@ -342,67 +400,74 @@ io.on('connection', socket => {
           player.stood = true;
           player.lastAction = 'Stand';
         } else if (action === 'doubledown') {
-          if (player.bjBet > player.chips) return cb({ ok: false, err: 'Fiches insufficienti per raddoppiare' });
+          if (player.bjBet > player.chips) return cb({ ok: false, err: 'Fiches insufficienti' });
           player.chips -= player.bjBet;
           room.pot += player.bjBet;
-          player.bjBet *= 2;
+          player.bjBet = player.bjBet * 2;
           if (room.cardMode === 'virtual') {
             player.cards.push(room.deck.pop());
-            const t = bjTotal(player.cards);
-            if (t > 21) { player.busted = true; player.lastAction = 'Double Down - Bust!'; }
+            var t = bjTotal(player.cards);
+            if (t > 21) { player.busted = true; player.lastAction = 'Double - Bust!'; }
             else { player.lastAction = 'Double Down'; }
           } else {
             player.lastAction = 'Double Down';
           }
           player.stood = true;
         } else if (action === 'surrender') {
-          const half = Math.floor(player.bjBet / 2);
+          var half = Math.floor(player.bjBet / 2);
           player.chips += half;
           room.pot -= half;
           player.stood = true;
           player.folded = true;
           player.lastAction = 'Surrender';
-        } else {
-          return cb({ ok: false, err: 'Azione non valida' });
         }
       }
     }
 
-    emitState(code);
+    emitState(data.code);
     cb({ ok: true });
   });
 
-  socket.on('swapCards', ({ code, indices }, cb) => {
-    const room = getRoom(code);
-    if (!room || room.gameType !== '5carddraw' || room.phase !== 'swap') return cb({ ok: false, err: 'Non in fase di scambio' });
-    const player = getPlayerBySocket(room, socket.id);
+  socket.on('swapCards', function(data, cb) {
+    var room = rooms[data.code];
+    if (!room || room.gameType !== '5carddraw' || room.phase !== 'swap') return cb({ ok: false, err: 'Non in fase scambio' });
+    var player = null;
+    for (var i = 0; i < room.players.length; i++) {
+      if (room.players[i].sid === socket.id) { player = room.players[i]; break; }
+    }
     if (!player || player.folded || player.swapped) return cb({ ok: false, err: 'Non puoi scambiare' });
-    if (!Array.isArray(indices)) return cb({ ok: false, err: 'Indici non validi' });
-    if (indices.length > room.maxSwap) return cb({ ok: false, err: `Puoi scambiare max ${room.maxSwap} carte` });
-
+    var indices = data.indices;
+    if (!Array.isArray(indices)) return cb({ ok: false, err: 'Dati non validi' });
+    if (indices.length > room.maxSwap) return cb({ ok: false, err: 'Max ' + room.maxSwap + ' carte' });
     if (room.cardMode === 'virtual') {
-      for (const idx of indices) {
+      for (var i = 0; i < indices.length; i++) {
+        var idx = indices[i];
         if (idx >= 0 && idx < player.cards.length) {
           player.cards[idx] = room.deck.pop();
         }
       }
     }
     player.swapped = true;
-    player.lastAction = indices.length === 0 ? 'Mantiene tutte' : `Scambia ${indices.length}`;
-    emitState(code);
+    player.lastAction = indices.length === 0 ? 'Mantiene tutte' : 'Scambia ' + indices.length;
+    emitState(data.code);
     cb({ ok: true });
   });
 
-  socket.on('hostAdvancePhase', ({ code }, cb) => {
-    const room = getRoom(code);
+  socket.on('hostAdvancePhase', function(data, cb) {
+    var room = rooms[data.code];
     if (!room) return cb({ ok: false, err: 'Stanza non trovata' });
-    const p = getPlayerBySocket(room, socket.id);
+    var p = null;
+    for (var i = 0; i < room.players.length; i++) {
+      if (room.players[i].sid === socket.id) { p = room.players[i]; break; }
+    }
     if (!p || p.id !== room.hostId) return cb({ ok: false, err: 'Non autorizzato' });
 
     if (room.gameType === 'texasholdem') {
       room.betsThisRound = {};
       room.currentBet = 0;
-      room.players.forEach(pl => { if (!pl.folded) pl.lastAction = ''; });
+      for (var i = 0; i < room.players.length; i++) {
+        if (!room.players[i].folded) room.players[i].lastAction = '';
+      }
       if (room.phase === 'preflop') {
         room.phase = 'flop';
         if (room.cardMode === 'virtual') {
@@ -411,23 +476,36 @@ io.on('connection', socket => {
         }
       } else if (room.phase === 'flop') {
         room.phase = 'turn';
-        if (room.cardMode === 'virtual') { room.deck.pop(); room.communityCards.push(room.deck.pop()); }
+        if (room.cardMode === 'virtual') {
+          room.deck.pop();
+          room.communityCards.push(room.deck.pop());
+        }
       } else if (room.phase === 'turn') {
         room.phase = 'river';
-        if (room.cardMode === 'virtual') { room.deck.pop(); room.communityCards.push(room.deck.pop()); }
+        if (room.cardMode === 'virtual') {
+          room.deck.pop();
+          room.communityCards.push(room.deck.pop());
+        }
       }
     } else if (room.gameType === 'blackjack') {
       if (room.phase === 'betting') {
         room.phase = 'playing';
-        room.players.forEach(pl => { if (pl.bjBet === 0) { pl.folded = true; } pl.lastAction = ''; });
+        for (var i = 0; i < room.players.length; i++) {
+          if (room.players[i].bjBet === 0) room.players[i].folded = true;
+          room.players[i].lastAction = '';
+        }
       } else if (room.phase === 'playing') {
         room.phase = 'results';
-        room.players.forEach(pl => { pl.lastAction = ''; });
+        for (var i = 0; i < room.players.length; i++) {
+          room.players[i].lastAction = '';
+        }
       }
     } else if (room.gameType === '5carddraw') {
       room.betsThisRound = {};
       room.currentBet = 0;
-      room.players.forEach(pl => { if (!pl.folded) pl.lastAction = ''; });
+      for (var i = 0; i < room.players.length; i++) {
+        if (!room.players[i].folded) room.players[i].lastAction = '';
+      }
       if (room.phase === 'firstbet') {
         room.phase = 'swap';
       } else if (room.phase === 'swap') {
@@ -436,35 +514,44 @@ io.on('connection', socket => {
         room.phase = 'showdown';
       }
     }
-    emitState(code);
+    emitState(data.code);
     cb({ ok: true });
   });
 
-  socket.on('closeHand', ({ code, results }, cb) => {
-    const room = getRoom(code);
+  socket.on('closeHand', function(data, cb) {
+    var room = rooms[data.code];
     if (!room) return cb({ ok: false, err: 'Stanza non trovata' });
-    const p = getPlayerBySocket(room, socket.id);
+    var p = null;
+    for (var i = 0; i < room.players.length; i++) {
+      if (room.players[i].sid === socket.id) { p = room.players[i]; break; }
+    }
     if (!p || p.id !== room.hostId) return cb({ ok: false, err: 'Non autorizzato' });
+
+    var results = data.results;
 
     if (room.gameType === 'blackjack') {
       if (!results || !Array.isArray(results)) return cb({ ok: false, err: 'Risultati mancanti' });
-      const winnerNames = [];
-      for (const r of results) {
-        const pl = room.players.find(x => x.id === r.id);
+      var winnerNames = [];
+      for (var i = 0; i < results.length; i++) {
+        var r = results[i];
+        var pl = null;
+        for (var j = 0; j < room.players.length; j++) {
+          if (room.players[j].id === r.id) { pl = room.players[j]; break; }
+        }
         if (!pl) continue;
         if (r.result === 'win') {
           pl.chips += pl.bjBet * 2;
-          pl.lastAction = '✅ Vince!';
+          pl.lastAction = 'Vince!';
           winnerNames.push(pl.nickname);
         } else if (r.result === 'blackjack') {
           pl.chips += Math.floor(pl.bjBet * 2.5);
-          pl.lastAction = '🎰 Blackjack!';
+          pl.lastAction = 'Blackjack!';
           winnerNames.push(pl.nickname + ' (BJ)');
         } else if (r.result === 'push') {
           pl.chips += pl.bjBet;
-          pl.lastAction = '🤝 Push';
+          pl.lastAction = 'Push';
         } else {
-          pl.lastAction = '❌ Perde';
+          pl.lastAction = 'Perde';
         }
       }
       room.history.unshift({
@@ -475,58 +562,21 @@ io.on('connection', socket => {
       });
     } else {
       if (!results || !Array.isArray(results) || results.length === 0) return cb({ ok: false, err: 'Seleziona almeno un vincitore' });
-      const share = Math.floor(room.pot / results.length);
-      const rem = room.pot % results.length;
-      const winnerNames = [];
-      results.forEach((rid, i) => {
-        const pl = room.players.find(x => x.id === rid);
+      var share = Math.floor(room.pot / results.length);
+      var rem = room.pot % results.length;
+      var winnerNames = [];
+      for (var i = 0; i < results.length; i++) {
+        var pl = null;
+        for (var j = 0; j < room.players.length; j++) {
+          if (room.players[j].id === results[i]) { pl = room.players[j]; break; }
+        }
         if (pl) {
           pl.chips += share + (i === 0 ? rem : 0);
           winnerNames.push(pl.nickname);
         }
-      });
+      }
       room.history.unshift({
         hand: room.handNum,
         winners: winnerNames.join(', '),
         pot: room.pot,
-        time: new Date().toLocaleTimeString('it')
-      });
-    }
-
-    room.pot = 0;
-    startNewHand(room);
-    emitState(code);
-    cb({ ok: true });
-  });
-
-  socket.on('endSession', ({ code }, cb) => {
-    const room = getRoom(code);
-    if (!room) return cb({ ok: false, err: 'Stanza non trovata' });
-    const p = getPlayerBySocket(room, socket.id);
-    if (!p || p.id !== room.hostId) return cb({ ok: false, err: 'Non autorizzato' });
-    const standings = room.players.map(pl => ({
-      nickname: pl.nickname,
-      chips: pl.chips,
-      diff: pl.chips - room.initialChips,
-      color: pl.color
-    })).sort((a, b) => b.chips - a.chips);
-    io.to(code).emit('sessionEnded', { standings });
-    delete rooms[code];
-    cb({ ok: true });
-  });
-
-  socket.on('disconnect', () => {
-    if (!socket.data) return;
-    const { code, nickname } = socket.data;
-    const room = getRoom(code);
-    if (!room) return;
-    const p = getPlayerByNick(room, nickname);
-    if (p) {
-      p.connected = false;
-      if (p.id === room.hostId) io.to(code).emit('hostPaused');
-      emitState(code);
-    }
-  });
-});
-
-server.listen(PORT, '0.0.0.0', () => console.log('Server on port ' + PORT));
+       
