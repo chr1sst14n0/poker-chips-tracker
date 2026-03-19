@@ -1,14 +1,11 @@
 {
   "name": "poker-chips-tracker",
-  "version": "1.0.0",
-  "description": "Real-time poker chips and betting tracker for physical card games",
+  "version": "2.0.0",
+  "description": "Real-time multiplayer card game chips tracker with virtual cards support",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
-  "keywords": ["poker", "chips", "tracker", "real-time", "multiplayer"],
-  "author": "",
-  "license": "MIT",
   "dependencies": {
     "express": "^4.18.2",
     "socket.io": "^4.6.1"
