@@ -1,7 +1,7 @@
 {
   "name": "poker-chips-tracker",
-  "version": "3.0.0",
-  "description": "Real-time card game chips tracker",
+  "version": "4.0.0",
+  "description": "Real-time multiplayer card game chips tracker with themes",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
